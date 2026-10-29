@@ -17,13 +17,21 @@ public:
     QString selection() const { return sel; }
     void setZoom(double z);
     double zoom() const { return scale; }
+    QString containerAt(QPointF pt) const;     // deepest visible container under pt, "" = the screen
+    QRect rectOf(const QString& ptr) const;    // absolute, in screen pixels
+
+    static constexpr const char* kWidgetMime = "application/x-erintesgfx-widget"; // drag from the widget rail
 
 signals:
     void selected(const QString& ptr);
     void moved();        // geometry changed while dragging
     void editFinished(); // drag or nudge done, time for an undo snapshot
+    void dropped(const QString& type, QPoint pt); // widget type dragged from the rail, pt in screen pixels
 
 protected:
+    void dragEnterEvent(QDragEnterEvent*) override;
+    void dragMoveEvent(QDragMoveEvent*) override;
+    void dropEvent(QDropEvent*) override;
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
@@ -36,9 +44,10 @@ private:
     void paintWidget(class QPainter& g, const Json& w);
     QString hit(const Json& comps, const QString& ptr, QPointF pt) const;
     QPoint offsetOf(const QString& ptr) const; // sum of parent container positions
-    QRect rectOf(const QString& ptr) const;    // absolute, in screen pixels
     bool resizable(const Json& w) const;
     QRectF handle() const;                     // resize handle of the selection, widget coords
+    void edges(const Json& comps, const QString& ptr, QPoint off, QVector<int>& xs, QVector<int>& ys) const;
+    QPoint snap(QRect r, bool move);           // shift that aligns r (absolute) to a nearby edge or centre
 
     Project& p;
     int screenIndex = 0;
@@ -48,4 +57,5 @@ private:
     QPointF dragStart;
     QRect dragOrig;
     bool dragged = false;
+    int guideX = -1, guideY = -1; // snap lines shown while dragging, screen pixels
 };

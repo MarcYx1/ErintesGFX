@@ -4,6 +4,7 @@
 
 #include <QMainWindow>
 #include <functional>
+#include <optional>
 #include <QProcess>
 
 class QFormLayout;
@@ -46,7 +47,7 @@ private:
     void writeUserFiles(const QString& screen); // gui/<screen>_screen View + Presenter, if missing
 
     // edits
-    void addWidget(const QString& type);
+    void addWidget(const QString& type, std::optional<QPoint> at = {}); // at: drop point on the canvas
     void deleteWidget();
     void duplicateWidget();
     void moveZ(int delta);

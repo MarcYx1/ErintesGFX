@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QDockWidget>
+#include <QDrag>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFontDatabase>
@@ -22,6 +23,8 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -42,21 +45,26 @@ QString qs(const std::string& s) { return QString::fromStdString(s); }
 std::string ss(const QString& s) { return s.toStdString(); }
 int num(const Json& j, const char* k, int def = 0) { return j.contains(k) ? (int)j[k].get<double>() : def; }
 
-QColor colorOf(const Json& w)
+QColor colorOf(const Json& w, const char* key = "Color")
 {
-    Json c = w.value("Color", Json::object());
+    Json c = w.value(key, Json::object());
     return QColor(num(c, "Red"), num(c, "Green"), num(c, "Blue"));
 }
 
 // Color as the Designer stores it: zero channels left out, black has no Color key at all.
-void setColor(Json& w, const QColor& c)
+void setColor(Json& w, const QColor& c, const char* key = "Color")
 {
     Json o = Json::object();
     if (c.red()) o["Red"] = c.red();
     if (c.green()) o["Green"] = c.green();
     if (c.blue()) o["Blue"] = c.blue();
-    setKey(w, "Color", o, Json::object());
+    setKey(w, key, o, Json::object());
 }
+
+// Widget types the editor can add, in the widget bar and the Add widget menu.
+const char* const kWidgetTypes[] = {"Box", "BoxWithBorder", "Circle", "Line", "Shape", "Image", "TextArea",
+                                    "BoxProgress", "CircleProgress", "ImageProgress", "LineProgress", "TextProgress",
+                                    "Container"};
 
 // Every string in the tree: widget kinds we don't know may keep text ids under other keys.
 void collectStrings(const Json& j, QSet<QString>& out)
@@ -114,6 +122,104 @@ QIcon stateIcon(bool eye, bool on)
     return icon = QIcon(pm);
 }
 
+// Rail button for one widget type: a click adds the widget, dragging it starts a drop onto the canvas.
+class WidgetButton : public QToolButton {
+public:
+    explicit WidgetButton(const QString& type) : type(type) {}
+
+protected:
+    void mousePressEvent(QMouseEvent* e) override
+    {
+        start = e->position().toPoint();
+        QToolButton::mousePressEvent(e);
+    }
+    void mouseMoveEvent(QMouseEvent* e) override
+    {
+        if (!(e->buttons() & Qt::LeftButton) ||
+            (e->position().toPoint() - start).manhattanLength() < QApplication::startDragDistance()) {
+            QToolButton::mouseMoveEvent(e);
+            return;
+        }
+        setDown(false); // a drag is not a click
+        auto* mime = new QMimeData;
+        mime->setData(Canvas::kWidgetMime, type.toUtf8());
+        auto* drag = new QDrag(this);
+        drag->setMimeData(mime);
+        drag->setPixmap(icon().pixmap(28, 28));
+        drag->exec(Qt::CopyAction);
+    }
+
+private:
+    QString type;
+    QPoint start;
+};
+
+// Rail icons, drawn in code like the eye/lock icons.
+QIcon widgetIcon(const QString& type)
+{
+    QPixmap pm(56, 56);
+    pm.fill(Qt::transparent);
+    QPainter g(&pm);
+    g.setRenderHint(QPainter::Antialiasing);
+    const QColor c(200, 200, 205), dim(110, 110, 115), accent(0, 190, 245);
+    g.setPen(QPen(c, 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (type == "Box") {
+        g.setBrush(c);
+        g.drawRoundedRect(QRectF(10, 14, 36, 28), 3, 3);
+    } else if (type == "Image") {
+        g.drawRoundedRect(QRectF(8, 12, 40, 32), 3, 3);
+        g.setBrush(c);
+        g.drawEllipse(QPointF(20, 23), 4, 4);
+        g.drawPolygon(QPolygonF({QPointF(12, 40), QPointF(26, 26), QPointF(34, 34), QPointF(38, 30), QPointF(44, 40)}));
+    } else if (type == "TextArea") {
+        QFont f = g.font();
+        f.setPixelSize(40);
+        f.setBold(true);
+        g.setFont(f);
+        g.drawText(QRectF(0, 0, 56, 56), Qt::AlignCenter, "T");
+    } else if (type == "Line") {
+        g.setPen(QPen(c, 5, Qt::SolidLine, Qt::RoundCap));
+        g.drawLine(QPointF(12, 44), QPointF(44, 12));
+    } else if (type == "Shape") {
+        g.setBrush(c);
+        g.drawPolygon(QPolygonF({QPointF(28, 8), QPointF(48, 28), QPointF(28, 48), QPointF(8, 28)}));
+    } else if (type == "BoxProgress") {
+        g.drawRoundedRect(QRectF(6, 20, 44, 16), 2, 2);
+        g.fillRect(QRectF(9, 23, 24, 10), accent);
+    } else if (type == "LineProgress") {
+        g.setPen(QPen(dim, 7, Qt::SolidLine, Qt::RoundCap));
+        g.drawLine(QPointF(10, 28), QPointF(46, 28));
+        g.setPen(QPen(accent, 7, Qt::SolidLine, Qt::RoundCap));
+        g.drawLine(QPointF(10, 28), QPointF(30, 28));
+    } else if (type == "BoxWithBorder") {
+        g.setPen(QPen(accent, 5));
+        g.setBrush(c);
+        g.drawRect(QRectF(10, 14, 36, 28));
+    } else if (type == "Circle") {
+        g.setBrush(c);
+        g.drawEllipse(QPointF(28, 28), 19, 19);
+    } else if (type == "CircleProgress") {
+        g.setPen(QPen(dim, 6, Qt::SolidLine, Qt::FlatCap));
+        g.drawEllipse(QPointF(28, 28), 17, 17);
+        g.setPen(QPen(accent, 6, Qt::SolidLine, Qt::FlatCap));
+        g.drawArc(QRectF(11, 11, 34, 34), 90 * 16, -230 * 16);
+    } else if (type == "ImageProgress") {
+        g.drawRoundedRect(QRectF(6, 20, 44, 16), 2, 2);
+        for (int x = 10; x < 34; x += 6) g.fillRect(QRectF(x, 23, 4, 10), accent);
+    } else if (type == "TextProgress") {
+        QFont f = g.font();
+        f.setPixelSize(19);
+        f.setBold(true);
+        g.setFont(f);
+        g.setPen(accent);
+        g.drawText(QRectF(0, 0, 56, 56), Qt::AlignCenter, "60%");
+    } else if (type == "Container") {
+        g.setPen(QPen(c, 3, Qt::DashLine));
+        g.drawRect(QRectF(8, 10, 40, 36));
+    }
+    return QIcon(pm);
+}
+
 // Combo that shrinks with the panel instead of growing to its longest item.
 QComboBox* newCombo()
 {
@@ -148,7 +254,28 @@ MainWindow::MainWindow()
     scroll->setWidget(canvas);
     scroll->setAlignment(Qt::AlignCenter);
     scroll->setBackgroundRole(QPalette::Dark);
-    setCentralWidget(scroll);
+
+    // Widget bar under the canvas: click adds, drag onto the canvas places.
+    auto* rail = new QToolBar;
+    rail->setObjectName("widgetBar");
+    rail->setStyleSheet("#widgetBar { background: rgb(50, 50, 54); border: 1px solid rgb(70, 70, 75);"
+                        " border-radius: 8px; padding: 3px; }");
+    rail->setIconSize(QSize(28, 28));
+    for (const char* t : kWidgetTypes) {
+        auto* b = new WidgetButton(t);
+        b->setIcon(widgetIcon(t));
+        b->setToolTip(QString(t) + "\nClick to add, drag onto the canvas to place");
+        connect(b, &QToolButton::clicked, this, [this, t] { addWidget(t); });
+        rail->addWidget(b);
+    }
+    auto* center = new QWidget;
+    auto* cl = new QVBoxLayout(center);
+    cl->setContentsMargins(0, 0, 0, 12);
+    cl->setSpacing(10);
+    cl->addWidget(scroll, 1);
+    cl->addWidget(rail, 0, Qt::AlignHCenter);
+    setCentralWidget(center);
+    connect(canvas, &Canvas::dropped, this, [this](const QString& type, QPoint pt) { addWidget(type, pt); });
 
     auto dock = [this](const QString& title, QWidget* w, Qt::DockWidgetArea area) {
         auto* d = new QDockWidget(title);
@@ -273,7 +400,7 @@ void MainWindow::buildActions()
     addBtn->setText("Add widget");
     addBtn->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(addBtn);
-    for (const char* t : {"Box", "Image", "TextArea", "Line", "Shape", "BoxProgress", "LineProgress", "Container"})
+    for (const char* t : kWidgetTypes)
         menu->addAction(t, this, [this, t] { addWidget(t); });
     addBtn->setMenu(menu);
     tb->addWidget(addBtn);
@@ -666,15 +793,15 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
             touched();
         });
     };
-    auto colorField = [&] {
+    auto colorField = [&](const char* key = "Color") {
         auto* b = new QPushButton;
         auto paint = [b](const QColor& c) { b->setStyleSheet("background:" + c.name() + "; min-height: 20px;"); };
-        paint(colorOf(W()));
-        f->addRow("Color", b);
+        paint(colorOf(W(), key));
+        f->addRow(key, b);
         connect(b, &QPushButton::clicked, this, [=] {
-            QColor c = QColorDialog::getColor(colorOf(W()), this);
+            QColor c = QColorDialog::getColor(colorOf(W(), key), this);
             if (!c.isValid()) return;
-            setColor(W(), c);
+            setColor(W(), c, key);
             paint(c);
             touched();
         });
@@ -703,7 +830,7 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
     boolField("Visible", true);
     boolField("LockPosition", false);
 
-    if (type == "TextArea") {
+    if (type == "TextArea" || type == "TextProgress") {
         const QString id = qs(widget.value("TextId", ""));
         TextEntry e = p.texts.get(id);
         auto* text = new QPlainTextEdit(e.text);
@@ -741,10 +868,29 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
             });
         }
         colorField();
-        boolField("AutoSize", false);
-        intField("LineSpacing", 0);
+        if (type == "TextArea") {
+            boolField("AutoSize", false);
+            intField("LineSpacing", 0);
+        } else {
+            intField("NumberOfDecimals", 0, 0, 2);
+        }
     } else if (type == "Box") {
         colorField();
+    } else if (type == "BoxWithBorder") {
+        colorField();
+        colorField("BorderColor");
+        intField("BorderSize", Json(), 0, 1000);
+    } else if (type == "Circle" || type == "CircleProgress") {
+        colorField();
+        dblField("CenterX", 0.0);
+        dblField("CenterY", 0.0);
+        dblField("Radius", Json());
+        dblField("LineWidth", 0.0);
+        dblField("StartAngle", 0.0);
+        dblField("EndAngle", Json());
+    } else if (type == "ImageProgress") {
+        imageField("FileNameImage", false);
+        enumField("Direction", {"Right", "Left", "Up", "Down"});
     } else if (type == "Image") {
         imageField("RelativeFilename", false);
     } else if (type == "Line" || type == "LineProgress") {
@@ -763,10 +909,12 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
     } else if (type == "BoxProgress") {
         colorField();
         enumField("Direction", {"Right", "Left", "Up", "Down"});
+    }
+    if (type == "BoxProgress" || type == "CircleProgress" || type == "ImageProgress" || type == "TextProgress") {
         for (const char* k : {"IndicatorPositionX", "IndicatorPositionY"}) intField(k, 0);
         for (const char* k : {"IndicatorPositionWidth", "IndicatorPositionHeight"}) intField(k, Json());
     }
-    if (type == "BoxProgress" || type == "LineProgress") {
+    if (type.endsWith("Progress")) {
         imageField("FileNameBackground", true);
         intField("ProgressRangeMin", 0);
         intField("ProgressRangeMax", Json());
@@ -833,7 +981,7 @@ void MainWindow::writeUserFiles(const QString& n)
     log("Created gui/" + l + " (View + Presenter).");
 }
 
-void MainWindow::addWidget(const QString& type)
+void MainWindow::addWidget(const QString& type, std::optional<QPoint> at)
 {
     const Json white = {{"Red", 255}, {"Green", 255}, {"Blue", 255}};
     QString base = type;
@@ -866,14 +1014,46 @@ void MainWindow::addWidget(const QString& type)
         w.update({{"Width", 200}, {"Height", 20}, {"Color", {{"Green", 255}}}, {"StartY", 10.0}, {"EndX", 200.0},
                   {"EndY", 10.0}, {"LineWidth", 20.0}, {"LineEndingStyle", "Butt"}, {"ProgressRangeMax", 100},
                   {"ProgressInitialValue", 60}});
+    } else if (type == "BoxWithBorder") {
+        w.update({{"Width", 100}, {"Height", 50}, {"Color", {{"Green", 51}, {"Blue", 102}}}, {"BorderColor", white},
+                  {"BorderSize", 5}});
+    } else if (type == "Circle") {
+        w.update({{"Width", 80}, {"Height", 80}, {"Color", white}, {"CenterX", 40.0}, {"CenterY", 40.0},
+                  {"Radius", 40.0}, {"EndAngle", 360.0}});
+    } else if (type == "CircleProgress") {
+        w.update({{"Width", 104}, {"Height", 104}, {"Color", {{"Green", 255}}}, {"CenterX", 52.0}, {"CenterY", 52.0},
+                  {"Radius", 47.0}, {"LineWidth", 10.0}, {"EndAngle", 360.0}, {"IndicatorPositionWidth", 104},
+                  {"IndicatorPositionHeight", 104}, {"ProgressRangeMax", 100}, {"ProgressInitialValue", 60}});
+    } else if (type == "ImageProgress") {
+        bool ok = false;
+        QString img = QInputDialog::getItem(this, "Image progress", "Fill bitmap from assets/images:", p.imageFiles(), 0, false, &ok);
+        if (!ok) return;
+        QPixmap pm = p.image(img);
+        w.update({{"Width", pm.width()}, {"Height", pm.height()}, {"FileNameImage", ss(img)}, {"Direction", "Right"},
+                  {"IndicatorPositionWidth", pm.width()}, {"IndicatorPositionHeight", pm.height()},
+                  {"ProgressRangeMax", 100}, {"ProgressInitialValue", 60}});
+    } else if (type == "TextProgress") {
+        const QString id = p.texts.add({"Center", p.texts.typographies.value(0, "Default"), "<value>%"});
+        w.update({{"Width", 80}, {"Height", 30}, {"Color", white}, {"TextId", ss(id)}, {"IndicatorPositionWidth", 80},
+                  {"IndicatorPositionHeight", 30}, {"ProgressRangeMax", 100}, {"ProgressInitialValue", 60}});
     } else if (type == "Container") {
         w.update({{"Width", 200}, {"Height", 100}, {"Components", Json::array()}});
     }
 
-    // Into the selected container, after the selected widget, or at the end of the screen.
+    // Dropped: top-left at the drop point, on top inside the container under it (or the screen).
+    // Clicked: into the selected container, after the selected widget, or at the end of the screen.
     const QString sel = canvas->selection();
     QString ptr;
-    if (!sel.isEmpty() && current().value("Type", "") == "Container") {
+    if (at) {
+        const QString box = canvas->containerAt(*at);
+        const QPoint local = *at - (box.isEmpty() ? QPoint() : canvas->rectOf(box).topLeft());
+        setKey(w, "X", local.x(), 0);
+        setKey(w, "Y", local.y(), 0);
+        Json& list = box.isEmpty() ? p.screens()[canvas->screen()]["Components"] : p.doc[Json::json_pointer(ss(box))]["Components"];
+        if (list.is_null()) list = Json::array();
+        list.push_back(w);
+        ptr = (box.isEmpty() ? canvas->base() : box + "/Components") + "/" + QString::number(list.size() - 1);
+    } else if (!sel.isEmpty() && current().value("Type", "") == "Container") {
         Json& list = current()["Components"];
         list.push_back(w);
         ptr = sel + "/Components/" + QString::number(list.size() - 1);

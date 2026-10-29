@@ -60,9 +60,11 @@ The project files are not changed; builds get these on the make command line:
 ## Not supported yet
 
 Custom containers, text areas with two wildcards, interactions other than hardware button -> go to
-screen (they are kept in the file but not generated), widgets other than Box, Image, TextArea, Line,
-Shape, BoxProgress, LineProgress, Container (drawn as a placeholder, skipped by the generator with a
-warning), editing shape points, flashing (no STM32_Programmer_CLI here).
+screen (they are kept in the file but not generated), widgets other than Box, BoxWithBorder, Circle,
+Image, TextArea, Line, Shape, BoxProgress, CircleProgress, ImageProgress, LineProgress, TextProgress,
+Container (drawn as a placeholder, skipped by the generator with a warning), editing shape points,
+flashing (no STM32_Programmer_CLI here). Code for BoxWithBorder, Circle, CircleProgress, ImageProgress
+and TextProgress follows the framework API but is not yet checked against Designer output.
 
 ## License
 

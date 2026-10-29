@@ -161,6 +161,15 @@ struct ScreenGen {
                     std::to_string(num(w, "ProgressRangeMax")) + ");");
     }
 
+    // Circle uses setArc, CircleProgress setStartEndAngle. Angles in degrees, 0 = up, clockwise.
+    void addCircle(const string& n, const Json& w, const string& arc, vector<string>& l)
+    {
+        l.push_back(n + ".setCenter(" + coord(flt(w, "CenterX")) + ", " + coord(flt(w, "CenterY")) + ");");
+        l.push_back(n + ".setRadius(" + coord(flt(w, "Radius")) + ");");
+        l.push_back(n + ".setLineWidth(" + coord(flt(w, "LineWidth")) + ");");
+        l.push_back(n + "." + arc + "(" + coord(flt(w, "StartAngle")) + ", " + coord(flt(w, "EndAngle", 360)) + ");");
+    }
+
     void addBackground(const string& n, const Json& w, vector<string>& l)
     {
         if (!w.contains("FileNameBackground")) return;
@@ -267,6 +276,49 @@ struct ScreenGen {
             addBackground(n, w, l);
             addPainter(n, w, l);
             addLine(n, w, l);
+            l.push_back(n + ".setValue(" + std::to_string(num(w, "ProgressInitialValue")) + ");");
+        // ponytail: types below are written from the framework API, no Designer golden sample to compare
+        } else if (type == "BoxWithBorder") {
+            include("touchgfx/widgets/BoxWithBorder.hpp");
+            member("touchgfx::BoxWithBorder", n);
+            l.push_back(position(n, w));
+            l.push_back(n + ".setColor(" + color(w) + ");");
+            l.push_back(n + ".setBorderColor(" + color(w, "BorderColor") + ");");
+            l.push_back(n + ".setBorderSize(" + std::to_string(num(w, "BorderSize")) + ");");
+        } else if (type == "Circle") {
+            include("touchgfx/widgets/canvas/Circle.hpp");
+            member("touchgfx::Circle", n);
+            canvas = true;
+            l.push_back(position(n, w));
+            addCircle(n, w, "setArc", l);
+            addPainter(n, w, l);
+        } else if (type == "CircleProgress") {
+            include("touchgfx/containers/progress_indicators/CircleProgress.hpp");
+            member("touchgfx::CircleProgress", n);
+            canvas = true;
+            addProgressBase(n, w, l);
+            addCircle(n, w, "setStartEndAngle", l);
+            addBackground(n, w, l);
+            addPainter(n, w, l);
+            l.push_back(n + ".setValue(" + std::to_string(num(w, "ProgressInitialValue")) + ");");
+        } else if (type == "ImageProgress") {
+            include("touchgfx/containers/progress_indicators/ImageProgress.hpp");
+            member("touchgfx::ImageProgress", n);
+            bitmaps = true;
+            addProgressBase(n, w, l);
+            l.push_back(n + ".setDirection(touchgfx::AbstractDirectionProgress::" + upper(str(w, "Direction", "Right")) + ");");
+            addBackground(n, w, l);
+            l.push_back(n + ".setBitmap(" + bitmapId(str(w, "FileNameImage")) + ");");
+            l.push_back(n + ".setValue(" + std::to_string(num(w, "ProgressInitialValue")) + ");");
+        } else if (type == "TextProgress") {
+            include("touchgfx/containers/progress_indicators/TextProgress.hpp");
+            member("touchgfx::TextProgress", n);
+            texts = true;
+            addProgressBase(n, w, l);
+            addBackground(n, w, l);
+            l.push_back(n + ".setColor(" + color(w) + ");");
+            l.push_back(n + ".setNumberOfDecimals(" + std::to_string(num(w, "NumberOfDecimals")) + ");");
+            l.push_back(n + ".setTypedText(touchgfx::TypedText(" + textId(str(w, "TextId")) + "));");
             l.push_back(n + ".setValue(" + std::to_string(num(w, "ProgressInitialValue")) + ");");
         } else {
             res.warnings.push_back(n + ": widget type " + type + " not supported, skipped");

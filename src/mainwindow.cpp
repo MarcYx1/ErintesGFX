@@ -14,6 +14,8 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QPainter>
+#include <QPainterPath>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -72,8 +74,70 @@ bool isButtonGoto(const Json& i)
     return sub(i, "Trigger").value("Type", "") == "TriggerPhysicalButtonClicked" && sub(i, "Action").value("Type", "") == "ActionGotoScreen";
 }
 
-const QStringList kTransitions{"None", "Slide", "Cover", "Wipe"};
-const QStringList kDirections{"East", "West", "North", "South"};
+// Eye (eye = true) or lock icon. `on` is the non-default state (hidden / locked): closed, in orange.
+QIcon stateIcon(bool eye, bool on)
+{
+    static QIcon cache[4];
+    QIcon& icon = cache[eye * 2 + on];
+    if (!icon.isNull()) return icon;
+    QPixmap pm(32, 32);
+    pm.fill(Qt::transparent);
+    QPainter g(&pm);
+    g.setRenderHint(QPainter::Antialiasing);
+    const QColor c = on ? QColor(255, 165, 50) : QColor(150, 150, 150);
+    g.setPen(QPen(c, 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    QPainterPath path;
+    if (eye && !on) { // open eye: two lids and a pupil
+        path.moveTo(3, 16);
+        path.quadTo(16, 3, 29, 16);
+        path.quadTo(16, 29, 3, 16);
+        g.drawPath(path);
+        g.setBrush(c);
+        g.drawEllipse(QPointF(16, 16), 4.5, 4.5);
+    } else if (eye) { // closed eye: lower lid with lashes
+        path.moveTo(3, 13);
+        path.quadTo(16, 25, 29, 13);
+        g.drawPath(path);
+        g.drawLine(QPointF(8.5, 17.5), QPointF(6, 22));
+        g.drawLine(QPointF(16, 19), QPointF(16, 24.5));
+        g.drawLine(QPointF(23.5, 17.5), QPointF(26, 22));
+    } else { // lock: shackle closed into the body, or lifted open on the right
+        path.moveTo(10, 15);
+        path.lineTo(10, 10);
+        path.arcTo(QRectF(10, 4, 12, 12), 180, -180);
+        path.lineTo(22, on ? 15 : 10);
+        if (!on) path.translate(0, -3);
+        g.drawPath(path);
+        g.setBrush(c);
+        g.drawRoundedRect(QRectF(6, 15, 20, 14), 2.5, 2.5);
+    }
+    return icon = QIcon(pm);
+}
+
+// Combo that shrinks with the panel instead of growing to its longest item.
+QComboBox* newCombo()
+{
+    auto* cb = new QComboBox;
+    cb->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    cb->setMinimumContentsLength(6);
+    return cb;
+}
+
+// Label that wraps instead of widening the panel.
+QLabel* wrapLabel(const QString& text)
+{
+    auto* l = new QLabel(text);
+    l->setWordWrap(true);
+    return l;
+}
+
+// "None", "Slide East", ... "Wipe South": transition and direction in one combo
+const QStringList kTransitions = [] {
+    QStringList l{"None"};
+    for (const char* kind : {"Slide", "Cover", "Wipe"})
+        for (const char* dir : {"East", "West", "North", "South"}) l << QString(kind) + " " + dir;
+    return l;
+}();
 
 } // namespace
 
@@ -114,8 +178,31 @@ MainWindow::MainWindow()
     });
 
     tree = new QTreeWidget;
-    tree->setHeaderHidden(true);
+    tree->setColumnCount(4);
+    tree->setHeaderLabels({"Name", "Type", "", ""});
+    tree->headerItem()->setToolTip(2, "Visible");
+    tree->headerItem()->setToolTip(3, "Locked");
+    tree->header()->setStretchLastSection(false);
+    tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    for (int c : {2, 3}) {
+        tree->header()->setSectionResizeMode(c, QHeaderView::Fixed);
+        tree->header()->resizeSection(c, 26);
+    }
+    tree->setMinimumWidth(320); // room for name, type, eye and lock
     dock("Widgets", tree, Qt::LeftDockWidgetArea);
+    // Eye / lock columns toggle Visible / LockPosition.
+    connect(tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* it, int col) {
+        if (col < 2) return;
+        Json& w = p.doc[Json::json_pointer(ss(it->data(0, Qt::UserRole).toString()))];
+        if (col == 2)
+            setKey(w, "Visible", !w.value("Visible", true), true);
+        else
+            setKey(w, "LockPosition", !w.value("LockPosition", false), false);
+        rebuildTree();
+        rebuildProperties();
+        changed();
+    });
     connect(tree, &QTreeWidget::itemSelectionChanged, this, [this] {
         auto* it = tree->currentItem();
         canvas->select(it ? it->data(0, Qt::UserRole).toString() : QString());
@@ -124,7 +211,8 @@ MainWindow::MainWindow()
 
     propsArea = new QScrollArea;
     propsArea->setWidgetResizable(true);
-    propsArea->setMinimumWidth(300);
+    propsArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); // fields shrink to fit instead
+    propsArea->setMinimumWidth(360);
     dock("Properties", propsArea, Qt::RightDockWidgetArea);
 
     logView = new QPlainTextEdit;
@@ -344,16 +432,24 @@ void MainWindow::showScreen(int i)
 void MainWindow::rebuildTree()
 {
     tree->blockSignals(true);
+    const int scrollPos = tree->verticalScrollBar()->value(); // icon clicks rebuild the tree, keep the view
     tree->clear();
     std::function<void(const Json&, const QString&, QTreeWidgetItem*)> add = [&](const Json& comps, const QString& ptr,
                                                                                 QTreeWidgetItem* parent) {
         for (size_t i = 0; i < comps.size(); ++i) {
             const Json& w = comps[i];
             auto* it = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
-            it->setText(0, qs(w.value("Name", "")) + "   " + qs(w.value("Type", "")));
+            const bool visible = w.value("Visible", true), locked = w.value("LockPosition", false);
+            it->setText(0, qs(w.value("Name", "")));
+            it->setText(1, qs(w.value("Type", "")));
+            it->setForeground(1, QColor(140, 140, 140));
+            it->setIcon(2, stateIcon(true, !visible));
+            it->setToolTip(2, visible ? "Visible, click to hide" : "Hidden, click to show");
+            it->setIcon(3, stateIcon(false, locked));
+            it->setToolTip(3, locked ? "Locked, click to unlock" : "Unlocked, click to lock");
             const QString me = ptr + "/" + QString::number(i);
             it->setData(0, Qt::UserRole, me);
-            if (!w.value("Visible", true)) it->setForeground(0, QColor(130, 130, 130));
+            if (!visible) it->setForeground(0, QColor(130, 130, 130));
             if (w.contains("Components")) add(w["Components"], me + "/Components", it);
         }
     };
@@ -361,6 +457,7 @@ void MainWindow::rebuildTree()
     tree->expandAll();
     for (QTreeWidgetItemIterator it(tree); *it; ++it)
         if ((*it)->data(0, Qt::UserRole).toString() == canvas->selection()) tree->setCurrentItem(*it);
+    tree->verticalScrollBar()->setValue(scrollPos);
     tree->blockSignals(false);
 }
 
@@ -404,9 +501,10 @@ void MainWindow::screenProperties(QFormLayout* f)
     });
 
     // Interactions: hardware button -> go to screen. Other kinds stay in the JSON untouched.
-    auto* table = new QTableWidget(0, 5);
-    table->setHorizontalHeaderLabels({"Name", "Button", "Go to", "Transition", "Direction"});
-    table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    auto* table = new QTableWidget(0, 4);
+    table->setHorizontalHeaderLabels({"Name", "Button", "Go to", "Transition"});
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch); // fit the panel width
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table->verticalHeader()->hide();
     table->setMinimumHeight(220);
     QStringList screens;
@@ -417,14 +515,14 @@ void MainWindow::screenProperties(QFormLayout* f)
             Json trig = {{"Type", "TriggerPhysicalButtonClicked"}};
             int key = static_cast<QSpinBox*>(table->cellWidget(r, 1))->value();
             if (key) trig["ButtonKey"] = key;
-            const QString tr = static_cast<QComboBox*>(table->cellWidget(r, 3))->currentText();
-            Json act = {{"Type", "ActionGotoScreen"}, {"ScreenTransitionType", ss("ScreenTransition" + tr)}};
-            if (tr != "None") act["ScreenTransitionDirection"] = ss(static_cast<QComboBox*>(table->cellWidget(r, 4))->currentText());
+            const QStringList tr = static_cast<QComboBox*>(table->cellWidget(r, 3))->currentText().split(' '); // kind [dir]
+            Json act = {{"Type", "ActionGotoScreen"}, {"ScreenTransitionType", ss("ScreenTransition" + tr[0])}};
+            if (tr.size() > 1) act["ScreenTransitionDirection"] = ss(tr[1]);
             act["ActionComponent"] = ss(static_cast<QComboBox*>(table->cellWidget(r, 2))->currentText());
             return Json{{"InteractionName", ss(table->item(r, 0)->text())}, {"Trigger", trig}, {"Action", act}};
         };
         for (int r = 0; r < table->rowCount(); ++r)
-            if (!table->cellWidget(r, 4)) return; // row still being filled
+            if (!table->cellWidget(r, 3)) return; // row still being filled
         // Table rows take the places of the button interactions, other kinds stay where they are.
         Json out = Json::array();
         int r = 0;
@@ -444,36 +542,28 @@ void MainWindow::screenProperties(QFormLayout* f)
         key->setRange(0, 255);
         const Json act = sub(i, "Action");
         key->setValue(num(sub(i, "Trigger"), "ButtonKey"));
-        auto* target = new QComboBox;
+        auto* target = newCombo();
         target->addItems(screens);
         const QString to = qs(act.value("ActionComponent", ""));
         if (!screens.contains(to)) target->addItem(to); // keep a target we can't find instead of retargeting
         target->setCurrentText(to);
-        auto* tr = new QComboBox;
+        auto* tr = newCombo();
         tr->addItems(kTransitions);
-        const QString kind = qs(act.value("ScreenTransitionType", "ScreenTransitionNone")).mid(16);
-        if (!kTransitions.contains(kind)) tr->addItem(kind);
+        QString kind = qs(act.value("ScreenTransitionType", "ScreenTransitionNone")).mid(16);
+        if (kind != "None") kind += " " + qs(act.value("ScreenTransitionDirection", "East"));
+        if (!kTransitions.contains(kind)) tr->addItem(kind); // keep kinds we don't list
         tr->setCurrentText(kind);
-        auto* dir = new QComboBox;
-        dir->addItems(kDirections);
-        dir->setCurrentText(qs(act.value("ScreenTransitionDirection", "East")));
-        dir->setEnabled(tr->currentText() != "None");
         table->setCellWidget(r, 1, key);
         table->setCellWidget(r, 2, target);
         table->setCellWidget(r, 3, tr);
-        table->setCellWidget(r, 4, dir);
         QObject::connect(key, &QSpinBox::valueChanged, table, writeBack);
         QObject::connect(target, &QComboBox::currentIndexChanged, table, writeBack);
-        QObject::connect(tr, &QComboBox::currentIndexChanged, table, [tr, dir, writeBack] {
-            dir->setEnabled(tr->currentText() != "None");
-            writeBack();
-        });
-        QObject::connect(dir, &QComboBox::currentIndexChanged, table, writeBack);
+        QObject::connect(tr, &QComboBox::currentIndexChanged, table, writeBack);
     };
     for (const Json& i : current().value("Interactions", Json::array()))
         if (isButtonGoto(i)) addRow(i);
     connect(table, &QTableWidget::itemChanged, this, writeBack);
-    f->addRow(new QLabel("Interactions (hardware button -> screen)"));
+    f->addRow(wrapLabel("Interactions (hardware button -> screen)"));
     f->addRow(table);
 
     auto* buttons = new QHBoxLayout;
@@ -544,7 +634,7 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
         });
     };
     auto enumField = [&](const char* key, const QStringList& options) {
-        auto* cb = new QComboBox;
+        auto* cb = newCombo();
         cb->addItems(options);
         cb->setCurrentText(qs(W().value(key, ss(options[0]))));
         f->addRow(key, cb);
@@ -554,10 +644,12 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
         });
     };
     auto imageField = [&](const char* key, bool optional) {
-        auto* cb = new QComboBox;
+        auto* cb = newCombo();
         if (optional) cb->addItem("(none)");
         cb->addItems(p.imageFiles());
+        cb->view()->setMinimumWidth(cb->view()->sizeHintForColumn(0) + 24); // popup shows full file names
         cb->setCurrentText(qs(W().value(key, std::string("(none)"))));
+        cb->setToolTip(cb->currentText());
         f->addRow(key, cb);
         connect(cb, &QComboBox::currentTextChanged, this, [=](const QString& v) {
             if (v == "(none)") {
@@ -617,12 +709,12 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
         auto* text = new QPlainTextEdit(e.text);
         text->setMaximumHeight(70);
         f->addRow("Text", text);
-        f->addRow("Text id", new QLabel(id));
-        auto* typo = new QComboBox;
+        f->addRow("Text id", wrapLabel(id));
+        auto* typo = newCombo();
         typo->addItems(p.texts.typographies);
         typo->setCurrentText(e.typography);
         f->addRow("Typography", typo);
-        auto* align = new QComboBox;
+        auto* align = newCombo();
         align->addItems({"Left", "Center", "Right"});
         align->setCurrentText(e.alignment);
         f->addRow("Alignment", align);
@@ -667,7 +759,7 @@ void MainWindow::widgetProperties(QFormLayout* f, Json& widget)
         dblField("Angle", 0.0);
         dblField("XScale", Json());
         dblField("YScale", Json());
-        f->addRow("Points", new QLabel(QString::number(widget["Points"].size()) + " (edit in the .touchgfx file)"));
+        f->addRow("Points", wrapLabel(QString::number(widget["Points"].size()) + " (edit in the .touchgfx file)"));
     } else if (type == "BoxProgress") {
         colorField();
         enumField("Direction", {"Right", "Left", "Up", "Down"});

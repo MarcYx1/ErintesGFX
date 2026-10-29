@@ -1,2 +1,4 @@
 build/
+build-*/
+*.AppImage
 ART12_DASH/

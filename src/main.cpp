@@ -14,6 +14,10 @@
 
 int main(int argc, char** argv)
 {
+    if (argc >= 2 && !strcmp(argv[1], "--version")) {
+        std::cout << "ErintesGFX " ERINTES_VERSION "\n";
+        return 0;
+    }
     // erintesgfx --generate <project.touchgfx> [out dir, default: the project's folder]
     if (argc >= 3 && !strcmp(argv[1], "--generate")) {
         std::ifstream in(argv[2]);
@@ -31,6 +35,7 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setOrganizationName("ErintesGFX");
     app.setApplicationName("ErintesGFX");
+    app.setApplicationVersion(ERINTES_VERSION);
     app.setStyle(QStyleFactory::create("Fusion"));
     QPalette pal;
     pal.setColor(QPalette::Window, QColor(37, 37, 40));

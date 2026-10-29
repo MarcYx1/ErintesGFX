@@ -28,6 +28,12 @@ distrobox enter erintes-dev -- sh -c 'export PATH=/usr/bin:/bin CC=/usr/bin/gcc 
 Run: `./erintesgfx.sh path/to/TouchGFX/MyApplication.touchgfx` (opens the last project without an argument).
 CLI code generation only: `build/erintesgfx --generate MyApplication.touchgfx`.
 
+## Release
+
+Bump `VERSION` in `CMakeLists.txt`, update `packaging/release-notes.md`, commit, then push a matching tag
+(`git tag v0.1.0 && git push origin v0.1.0`). `.github/workflows/appimage.yml` builds and tests the
+AppImage and publishes the GitHub release.
+
 ## Keys
 
 | Key | Action |

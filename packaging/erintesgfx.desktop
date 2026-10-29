@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ErintesGFX
+Comment=Editor for TouchGFX projects
+Exec=erintesgfx %f
+Icon=erintesgfx
+Categories=Development;IDE;
+MimeType=application/x-touchgfx;
+Terminal=false

@@ -13,6 +13,7 @@
 #include <QFileDialog>
 #include <QFontDatabase>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QPainter>
@@ -29,6 +30,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSaveFile>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSpinBox>
@@ -72,6 +74,34 @@ void collectStrings(const Json& j, QSet<QString>& out)
     if (j.is_string()) out << qs(j.get<std::string>());
     else if (j.is_structured())
         for (const Json& v : j) collectStrings(v, out);
+}
+
+QHash<QString, TextEntry> singleUseTexts(const Json& j, const TextDb& db)
+{
+    QSet<QString> used;
+    collectStrings(j, used);
+    QHash<QString, TextEntry> out;
+    for (const QString& id : used)
+        if (id.startsWith("__SingleUse_") && db.has(id)) out[id] = db.get(id);
+    return out;
+}
+
+// A pasted or duplicated tree, already in the document: own copies of its __SingleUse texts
+// and, with rename, new widget names. In place, so each new name sees the ones picked before it.
+void freshCopy(Project& p, Json& j, const QHash<QString, TextEntry>& texts, bool rename)
+{
+    if (j.is_string()) {
+        const QString s = qs(j.get<std::string>());
+        if (texts.contains(s)) j = ss(p.texts.add(texts[s]));
+        return;
+    }
+    if (rename && j.is_object() && j.contains("Type") && j.contains("Name")) {
+        QString base = qs(j.value("Type", "widget"));
+        base[0] = base[0].toLower();
+        j["Name"] = ss(p.makeName(base));
+    }
+    if (j.is_structured())
+        for (Json& v : j) freshCopy(p, v, texts, rename);
 }
 
 // j[k] for reading, an empty object when missing (const operator[] on a missing key is undefined)
@@ -291,15 +321,22 @@ MainWindow::MainWindow()
     sl->setContentsMargins(0, 0, 0, 0);
     screenList = new QListWidget;
     sl->addWidget(screenList);
-    auto* sb = new QHBoxLayout;
+    auto* sb = new QGridLayout;
     auto* addS = new QPushButton("+ Screen");
+    auto* dupS = new QPushButton("Duplicate");
     auto* delS = new QPushButton("- Screen");
-    sb->addWidget(addS);
-    sb->addWidget(delS);
+    auto* startS = new QPushButton("Set start");
+    startS->setToolTip("Make the selected screen the one the app starts on");
+    sb->addWidget(addS, 0, 0);
+    sb->addWidget(dupS, 0, 1);
+    sb->addWidget(delS, 1, 0);
+    sb->addWidget(startS, 1, 1);
     sl->addLayout(sb);
     dock("Screens", screensBox, Qt::LeftDockWidgetArea);
     connect(addS, &QPushButton::clicked, this, &MainWindow::addScreen);
+    connect(dupS, &QPushButton::clicked, this, &MainWindow::duplicateScreen);
     connect(delS, &QPushButton::clicked, this, &MainWindow::deleteScreen);
+    connect(startS, &QPushButton::clicked, this, &MainWindow::setStartScreen);
     connect(screenList, &QListWidget::currentRowChanged, this, [this](int r) {
         if (r >= 0) showScreen(r);
     });
@@ -410,6 +447,13 @@ void MainWindow::buildActions()
     del->setShortcutContext(Qt::WidgetShortcut);
     canvas->addAction(del);
     tree->addAction(del);
+    // Same for copy / paste: text fields keep their own.
+    for (QAction* a : {act("Copy", QKeySequence::Copy, [this] { copyWidget(); }, false),
+                       act("Paste", QKeySequence::Paste, [this] { pasteWidget(); }, false)}) {
+        a->setShortcutContext(Qt::WidgetShortcut);
+        canvas->addAction(a);
+        tree->addAction(a);
+    }
     act("Forward", QKeySequence("Ctrl+PgUp"), [this] { moveZ(1); });
     act("Backward", QKeySequence("Ctrl+PgDown"), [this] { moveZ(-1); });
     tb->addSeparator();
@@ -450,18 +494,34 @@ bool MainWindow::open(const QString& file)
     history = {{p.doc.dump(), p.texts.raw}};
     historyIndex = 0;
     dirty = false;
-    screenList->blockSignals(true);
-    screenList->clear();
     int start = 0;
-    for (const Json& s : p.screens()) {
-        if (s.value("Name", "") == p.app().value("StartupScreenName", "")) start = screenList->count();
-        screenList->addItem(qs(s.value("Name", "")));
-    }
-    screenList->blockSignals(false);
+    for (size_t i = 0; i < p.screens().size(); ++i)
+        if (p.screens()[i].value("Name", "") == p.app().value("StartupScreenName", "")) start = int(i);
     canvas->setZoom(1.0);
+    fillScreens();
     showScreen(start);
     setWindowTitle("ErintesGFX - " + qs(p.app().value("Name", "")));
     log("Opened " + file);
+
+    QFile as(autosavePath());
+    if (as.exists()) {
+        const auto r = QMessageBox::question(this, "Autosave",
+                                             "There are unsaved changes from an earlier session (" + as.fileName() +
+                                                 ").\n\nRestore them? No deletes the autosave.");
+        Json a = as.open(QIODevice::ReadOnly) ? Json::parse(as.readAll().toStdString(), nullptr, false) : Json();
+        if (r != QMessageBox::Yes) {
+            as.remove();
+        } else if (!a.is_object() || !a.contains("doc") || !a.contains("texts")) {
+            log("Autosave is unreadable, left as it is: " + as.fileName());
+        } else {
+            p.doc = a["doc"];
+            p.texts.setRaw(qs(a["texts"].get<std::string>()));
+            fillScreens();
+            showScreen(qMin(canvas->screen(), int(p.screens().size()) - 1));
+            changed(); // undo goes back to the saved project
+            log("Restored the autosave. Save to keep it in the project.");
+        }
+    }
     return true;
 }
 
@@ -476,6 +536,7 @@ void MainWindow::changed()
     history.append({std::move(now), p.texts.raw});
     if (history.size() > 300) history.removeFirst();
     historyIndex = history.size() - 1;
+    autosave();
 }
 
 void MainWindow::restore(int index)
@@ -484,11 +545,20 @@ void MainWindow::restore(int index)
     p.doc = Json::parse(history[index].first);
     p.texts.setRaw(history[index].second);
     dirty = true;
-    screenList->blockSignals(true);
-    screenList->clear();
-    for (const Json& s : p.screens()) screenList->addItem(qs(s.value("Name", "")));
-    screenList->blockSignals(false);
+    fillScreens();
     showScreen(qMin(canvas->screen(), int(p.screens().size()) - 1));
+    autosave();
+}
+
+void MainWindow::autosave()
+{
+    QSaveFile f(autosavePath()); // atomic: a crash mid-write leaves the previous autosave
+    if (!f.open(QIODevice::WriteOnly)) {
+        log("Autosave failed: " + f.errorString());
+        return;
+    }
+    f.write(QByteArray::fromStdString(Json{{"doc", p.doc}, {"texts", ss(p.texts.raw)}}.dump()));
+    if (!f.commit()) log("Autosave failed: " + f.errorString());
 }
 
 bool MainWindow::save()
@@ -499,6 +569,7 @@ bool MainWindow::save()
         return false;
     }
     dirty = false;
+    QFile::remove(autosavePath());
     setWindowTitle("ErintesGFX - " + qs(p.app().value("Name", "")));
     log("Saved " + p.file);
     return true;
@@ -554,6 +625,22 @@ void MainWindow::showScreen(int i)
     canvas->setScreen(i);
     rebuildTree();
     rebuildProperties();
+}
+
+void MainWindow::fillScreens()
+{
+    screenList->blockSignals(true);
+    screenList->clear();
+    for (const Json& s : p.screens()) {
+        auto* it = new QListWidgetItem(qs(s.value("Name", "")), screenList);
+        if (s.value("Name", "") != p.app().value("StartupScreenName", "")) continue;
+        it->setText(it->text() + " (start)");
+        QFont f = it->font();
+        f.setBold(true);
+        it->setFont(f);
+    }
+    screenList->setCurrentRow(qMin(canvas->screen(), screenList->count() - 1));
+    screenList->blockSignals(false);
 }
 
 void MainWindow::rebuildTree()
@@ -1042,7 +1129,6 @@ void MainWindow::addWidget(const QString& type, std::optional<QPoint> at)
 
     // Dropped: top-left at the drop point, on top inside the container under it (or the screen).
     // Clicked: into the selected container, after the selected widget, or at the end of the screen.
-    const QString sel = canvas->selection();
     QString ptr;
     if (at) {
         const QString box = canvas->containerAt(*at);
@@ -1053,24 +1139,38 @@ void MainWindow::addWidget(const QString& type, std::optional<QPoint> at)
         if (list.is_null()) list = Json::array();
         list.push_back(w);
         ptr = (box.isEmpty() ? canvas->base() : box + "/Components") + "/" + QString::number(list.size() - 1);
-    } else if (!sel.isEmpty() && current().value("Type", "") == "Container") {
-        Json& list = current()["Components"];
-        list.push_back(w);
-        ptr = sel + "/Components/" + QString::number(list.size() - 1);
-    } else if (!sel.isEmpty()) {
-        int i;
-        Json& list = parentList(sel, &i);
-        list.insert(list.begin() + i + 1, w);
-        ptr = sel.left(sel.lastIndexOf('/') + 1) + QString::number(i + 1);
     } else {
-        Json& s = p.screens()[canvas->screen()];
-        if (!s.contains("Components")) s["Components"] = Json::array();
-        s["Components"].push_back(w);
-        ptr = canvas->base() + "/" + QString::number(s["Components"].size() - 1);
+        QString prefix;
+        int i;
+        Json& list = insertTarget(&prefix, &i);
+        list.insert(list.begin() + i, w);
+        ptr = prefix + QString::number(i);
     }
     rebuildTree();
     selectPtr(ptr);
     changed();
+}
+
+Json& MainWindow::insertTarget(QString* prefix, int* at)
+{
+    const QString sel = canvas->selection();
+    Json* list;
+    if (!sel.isEmpty() && current().value("Type", "") == "Container") {
+        list = &current()["Components"];
+        *prefix = sel + "/Components/";
+        *at = int(list->size());
+    } else if (!sel.isEmpty()) {
+        int i;
+        list = &parentList(sel, &i);
+        *prefix = sel.left(sel.lastIndexOf('/') + 1);
+        *at = i + 1;
+    } else {
+        list = &p.screens()[canvas->screen()]["Components"];
+        *prefix = canvas->base() + "/";
+        *at = int(list->size());
+    }
+    if (list->is_null()) *list = Json::array();
+    return *list;
 }
 
 void MainWindow::deleteWidget()
@@ -1091,25 +1191,47 @@ void MainWindow::duplicateWidget()
     const QString sel = canvas->selection();
     if (sel.isEmpty()) return;
     Json copy = current();
-    std::function<void(Json&)> fresh = [&](Json& w) {
-        QString base = qs(w.value("Type", "widget"));
-        base[0] = base[0].toLower();
-        w["Name"] = ss(p.makeName(base));
-        const QString id = qs(w.value("TextId", ""));
-        if (id.startsWith("__SingleUse_")) w["TextId"] = ss(p.texts.add(p.texts.get(id)));
-        if (w.contains("Components"))
-            for (Json& c : w["Components"]) fresh(c);
-    };
-    // Names must be unique before the copy is in the tree, so pick them one by one.
-    fresh(copy);
     setKey(copy, "X", num(copy, "X") + 10, 0);
     setKey(copy, "Y", num(copy, "Y") + 10, 0);
     int i;
     Json& list = parentList(sel, &i);
     list.insert(list.begin() + i + 1, copy);
+    freshCopy(p, list[i + 1], singleUseTexts(copy, p.texts), true);
     const QString ptr = sel.left(sel.lastIndexOf('/') + 1) + QString::number(i + 1);
     rebuildTree();
     selectPtr(ptr);
+    changed();
+}
+
+void MainWindow::copyWidget()
+{
+    if (canvas->selection().isEmpty()) return;
+    clip = current();
+    clipTexts = singleUseTexts(clip, p.texts);
+}
+
+// Like Add widget: into the selected container, after the selected widget, or at the end of the screen.
+void MainWindow::pasteWidget()
+{
+    if (clip.is_null()) return;
+    QString prefix;
+    int i;
+    Json& list = insertTarget(&prefix, &i);
+    list.insert(list.begin() + i, clip);
+    Json& w = list[i];
+    freshCopy(p, w, clipTexts, true);
+    // Same X/Y as the copy, moved down-right while a sibling sits exactly there.
+    auto taken = [&] {
+        for (int k = 0; k < int(list.size()); ++k)
+            if (k != i && num(list[k], "X") == num(w, "X") && num(list[k], "Y") == num(w, "Y")) return true;
+        return false;
+    };
+    while (taken()) {
+        setKey(w, "X", num(w, "X") + 10, 0);
+        setKey(w, "Y", num(w, "Y") + 10, 0);
+    }
+    rebuildTree();
+    selectPtr(prefix + QString::number(i));
     changed();
 }
 
@@ -1128,20 +1250,49 @@ void MainWindow::moveZ(int delta)
     changed();
 }
 
-void MainWindow::addScreen()
+QString MainWindow::askScreenName(const QString& title, const QString& def)
 {
-    QString n = QInputDialog::getText(this, "New screen", "Name (letters, digits, _):");
+    QString n = QInputDialog::getText(this, title, "Name (letters, digits, _):", QLineEdit::Normal, def);
     static const QRegularExpression ident("^[A-Za-z_][A-Za-z0-9_]*$");
-    if (n.isEmpty()) return;
+    if (n.isEmpty()) return {};
     for (const Json& s : p.screens())
         if (qs(s.value("Name", "")) == n) n.clear();
     if (!ident.match(n).hasMatch()) {
-        QMessageBox::warning(this, "New screen", "Name must be a unique C++ identifier.");
-        return;
+        QMessageBox::warning(this, title, "Name must be a unique C++ identifier.");
+        return {};
     }
+    return n;
+}
+
+void MainWindow::addScreen()
+{
+    const QString n = askScreenName("New screen", {});
+    if (n.isEmpty()) return;
     p.screens().push_back({{"Name", ss(n)}, {"Components", Json::array()}, {"Interactions", Json::array()}});
     screenList->addItem(n);
     showScreen(screenList->count() - 1);
+    changed();
+}
+
+// Widget names stay: each screen is its own class. __SingleUse texts get their own copies.
+void MainWindow::duplicateScreen()
+{
+    const int i = canvas->screen();
+    const QString n = askScreenName("Duplicate screen", qs(p.screens()[i].value("Name", "")) + "Copy");
+    if (n.isEmpty()) return;
+    Json s = p.screens()[i];
+    s["Name"] = ss(n);
+    p.screens().insert(p.screens().begin() + i + 1, s);
+    if (s.contains("Components")) freshCopy(p, p.screens()[i + 1]["Components"], singleUseTexts(s, p.texts), false);
+    fillScreens();
+    showScreen(i + 1);
+    changed();
+}
+
+void MainWindow::setStartScreen()
+{
+    p.app()["StartupScreenName"] = p.screens()[canvas->screen()]["Name"];
+    fillScreens();
     changed();
 }
 
@@ -1245,6 +1396,7 @@ void MainWindow::closeEvent(QCloseEvent* e)
             e->ignore();
             return;
         }
+        if (r == QMessageBox::Discard) QFile::remove(autosavePath());
     }
     QSettings().setValue("windowState", saveState());
     e->accept();

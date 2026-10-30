@@ -28,6 +28,8 @@ private:
     // project state
     void changed();               // after every edit: redraw, mark dirty, undo snapshot
     void restore(int index);      // undo/redo
+    void autosave();              // <project>.touchgfx.autosave, the project file itself is untouched
+    QString autosavePath() const { return p.file + ".autosave"; }
     bool save();
     bool generate();              // save + write generated/ code
     void cleanTexts();            // drop __SingleUse texts nobody uses any more
@@ -37,6 +39,7 @@ private:
     // UI
     void buildActions();
     void showScreen(int i);
+    void fillScreens();           // screen list from the JSON, start screen bold
     void rebuildTree();
     void selectPtr(const QString& ptr);
     void rebuildProperties();
@@ -48,11 +51,17 @@ private:
 
     // edits
     void addWidget(const QString& type, std::optional<QPoint> at = {}); // at: drop point on the canvas
+    Json& insertTarget(QString* prefix, int* at); // list a new widget goes into, its pointer prefix and index
     void deleteWidget();
     void duplicateWidget();
+    void copyWidget();
+    void pasteWidget();
     void moveZ(int delta);
+    QString askScreenName(const QString& title, const QString& def); // empty: cancelled or invalid
     void addScreen();
+    void duplicateScreen();
     void deleteScreen();
+    void setStartScreen();
 
     // build
     void runStep(const QString& title, const QString& command, std::function<void()> then = {});
@@ -72,4 +81,6 @@ private:
     QList<QPair<std::string, QString>> history; // (json, texts.xml)
     int historyIndex = -1;
     bool dirty = false;
+    Json clip;                           // Ctrl+C widget
+    QHash<QString, TextEntry> clipTexts; // its __SingleUse texts, kept in case the original goes away
 };

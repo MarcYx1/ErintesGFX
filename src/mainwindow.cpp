@@ -1326,9 +1326,13 @@ void MainWindow::deleteScreen()
 void MainWindow::runStep(const QString& title, const QString& command, std::function<void()> then)
 {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // Arm GCC: newest ~/opt/arm-gnu-toolchain-*, else the one STM32CubeIDE installs
     QStringList tc = QDir(QDir::homePath() + "/opt").entryList({"arm-gnu-toolchain-*"}, QDir::Dirs, QDir::Name);
+    const QString cube = QDir::homePath() + "/.local/share/stm32cube/bundles/gnu-tools-for-stm32";
+    QStringList ct = QDir(cube).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     QString path = env.value("PATH");
     if (!tc.isEmpty()) path = QDir::homePath() + "/opt/" + tc.last() + "/bin:" + path;
+    else if (!ct.isEmpty()) path = cube + "/" + ct.last() + "/bin:" + path;
     env.insert("PATH", path);
     // TouchGFX textconvert still calls File.exists?, gone since Ruby 3.2
     env.insert("RUBYOPT", "-r" + QCoreApplication::applicationDirPath() + "/ruby_compat.rb");

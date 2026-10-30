@@ -16,7 +16,8 @@ distrobox enter erintes-dev -- sudo apt-get install -y build-essential cmake nin
 ```
 
 Arm GCC: unpack `arm-gnu-toolchain-*-x86_64-arm-none-eabi.tar.xz` from developer.arm.com into `~/opt`.
-The newest `~/opt/arm-gnu-toolchain-*` is put on PATH for builds.
+The newest `~/opt/arm-gnu-toolchain-*` is put on PATH for builds; without one, the newest
+STM32CubeIDE bundle in `~/.local/share/stm32cube/bundles/gnu-tools-for-stm32/*/bin`.
 
 Build:
 

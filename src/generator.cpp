@@ -175,6 +175,10 @@ struct ScreenGen {
         if (!w.contains("FileNameBackground")) return;
         bitmaps = true;
         l.push_back(n + ".setBackground(touchgfx::Bitmap(" + bitmapId(str(w, "FileNameBackground")) + "));");
+        // setBackground resizes the widget to the bitmap; keep the designed size like the canvas shows it
+        if (w.contains("Width") && w.contains("Height"))
+            l.push_back(n + ".setWidthHeight(" + std::to_string(num(w, "Width")) + ", " +
+                        std::to_string(num(w, "Height")) + ");");
     }
 
     string position(const string& n, const Json& w)
